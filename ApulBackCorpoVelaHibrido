@@ -1,0 +1,162 @@
+var
+  hpv, lpv, lpc, mAtr, Atr, hpc, Stop: Float;
+  SinalC, SinalV, SinalSC, SinalSV: Boolean;
+  CandleAlta, CandleBaixa: Boolean;
+  MediaCurta, MediaLonga: Float;
+  EntradaCompraValida, EntradaVendaValida: Boolean;
+  UltimaOperacao: Integer; // candle da última operação fechada
+  MinimoEntreOperacoes: Integer; // intervalo mínimo em candles
+  OperacaoEmAndamento: Boolean; // indica se posição está aberta
+  PodeTentarEntrada: Boolean; // controle para tentar abrir nova operação
+
+  // --------- NOVO: métricas do candle / filtros ---------
+  Corpo, Range, PavioSup, PavioInf, ProporcaoCorpo: Float;
+  CorpoCurto, PavioOk, SemSpike: Boolean;
+  CandleForte, CandleCurtoComPavio, CandleValido: Boolean;
+
+  // --------- parâmetros ajustáveis ----------
+  MinProporcaoCorpo_Alta, MaxProporcaoPavio_Alta, MaxRangeATR_Alta, MaxCorpoATR_Alta: Float;
+  MaxProporcaoCorpo_Curta, MinProporcaoPavio_Curta, MaxProporcaoPavio_Curta, MaxRangeATR_Curta, MaxCorpoATR_Curta: Float;
+
+// =====================
+// FUNÇÃO: ZONAS PROIBIDAS DE OPERAÇÃO
+// =====================
+function EmZonaRestrita(preco: real): boolean;
+begin
+  result :=
+    ((preco >= 137072) and (preco <= 137350)) or
+    ((preco >= 137761) and (preco <= 138040)) or
+    ((preco >= 138454) and (preco <= 138733)) or
+    ((preco >= 139151) and (preco <= 139429)) or
+    ((preco >= 139851) and (preco <= 140129)) or
+    ((preco >= 140554) and (preco <= 140833));
+end;
+
+inicio
+
+  // ------------------ parâmetros ajustáveis ------------------
+  MinimoEntreOperacoes := 3;
+
+  // Candles fortes (corpo grande)
+  MinProporcaoCorpo_Alta := 0.60;  // corpo pelo menos 60% do range
+  MaxProporcaoPavio_Alta := 0.40;  // pavio até 40%
+  MaxRangeATR_Alta := 2.8;
+  MaxCorpoATR_Alta := 2.0;
+
+  // Candles pequenos (corpo curto + pavio médio)
+  MaxProporcaoCorpo_Curta := 0.35; // corpo até 35%
+  MinProporcaoPavio_Curta := 0.25; // pavio pelo menos 25%
+  MaxProporcaoPavio_Curta := 0.55; // pavio até 55%
+  MaxRangeATR_Curta := 2.5;
+  MaxCorpoATR_Curta := 1.2;
+
+  // ------------------ indicadores base ------------------
+  hpc := Highest(high, 20);
+  lpc := Lowest(Low, 10);
+
+  hpv := Highest(high, 10);
+  lpv := Lowest(Low, 20);
+
+  atr := AvgTrueRange(20, 0);
+  mAtr := Media(20, atr);
+
+  MediaCurta := Media(Close, 9);
+  MediaLonga := Media(Close, 21);
+
+  CandleAlta := Close > Open;
+  CandleBaixa := Close < Open;
+
+  SinalC  := (Close > hpc[1]);
+  SinalSC := (Close < lpc[1]);
+
+  SinalV  := (Close < lpv[1]);
+  SinalSV := (Close > hpv[1]);
+
+  // ------------------ análise do candle ------------------
+  Range := High - Low;
+  if Range = 0 then Range := 0.0001;
+
+  Corpo := Abs(Close - Open);
+  PavioSup := High - Max(Open, Close);
+  PavioInf := Min(Open, Close) - Low;
+  ProporcaoCorpo := Corpo / Range;
+
+  // ------------------ 1) Candle forte ------------------
+  CandleForte := (ProporcaoCorpo >= MinProporcaoCorpo_Alta) and
+                 (PavioSup <= MaxProporcaoPavio_Alta * Range) and
+                 (PavioInf <= MaxProporcaoPavio_Alta * Range) and
+                 (Range <= MaxRangeATR_Alta * atr) and
+                 (Corpo <= MaxCorpoATR_Alta * atr);
+
+  // ------------------ 2) Candle curto + pavio médio ------------------
+  CorpoCurto := (ProporcaoCorpo <= MaxProporcaoCorpo_Curta) and
+                (Corpo <= MaxCorpoATR_Curta * atr);
+
+  PavioOk := (PavioSup >= MinProporcaoPavio_Curta * Range) and (PavioSup <= MaxProporcaoPavio_Curta * Range) and
+             (PavioInf >= MinProporcaoPavio_Curta * Range) and (PavioInf <= MaxProporcaoPavio_Curta * Range);
+
+  SemSpike := (Range <= MaxRangeATR_Curta * atr);
+
+  CandleCurtoComPavio := CorpoCurto and PavioOk and SemSpike;
+
+  // ------------------ candle válido (passa em pelo menos um filtro) ------------------
+  CandleValido := CandleForte or CandleCurtoComPavio;
+
+  // ------------------ regras de entrada ------------------
+  EntradaCompraValida := SinalC and CandleAlta and (MediaCurta >= MediaLonga) and CandleValido;
+  EntradaVendaValida  := SinalV and CandleBaixa and (MediaCurta <= MediaLonga) and CandleValido;
+
+  if UltimaOperacao = 0 then UltimaOperacao := -10; // inicialização segura
+
+  // ------------------ estado da operação ------------------
+  if IsBought or IsSold then
+  begin
+    OperacaoEmAndamento := True;
+    PodeTentarEntrada := False;
+  end
+  else
+  begin
+    if OperacaoEmAndamento then
+    begin
+      OperacaoEmAndamento := False;
+      UltimaOperacao := CurrentBar;
+      PodeTentarEntrada := True;
+    end
+    else
+      PodeTentarEntrada := True;
+  end;
+
+  // ------------------ gestão das posições abertas ------------------
+  if IsBought then
+  begin
+    if SinalSC then ClosePosition;
+    SellToCoverStop(BuyPrice - Stop, BuyPrice - Stop - 500);
+  end;
+
+  if IsSold then
+  begin
+    if SinalSV then ClosePosition;
+    BuyToCoverStop(SellPrice + Stop, SellPrice + Stop + 500);
+  end;
+
+  // ------------------ tentativas de entrada ------------------
+  if PodeTentarEntrada and (not OperacaoEmAndamento) and (CurrentBar > UltimaOperacao + MinimoEntreOperacoes) then
+  begin
+    Stop := mAtr * 2;
+    if Stop = 0 then Stop := 100;
+
+    if EntradaCompraValida and (not EmZonaRestrita(Close[1])) then
+    begin
+      BuyAtMarket;
+      OperacaoEmAndamento := True;
+      PodeTentarEntrada := False;
+    end
+    else if EntradaVendaValida and (not EmZonaRestrita(Close[1])) then
+    begin
+      SellShortAtMarket;
+      OperacaoEmAndamento := True;
+      PodeTentarEntrada := False;
+    end;
+  end;
+
+fim;
